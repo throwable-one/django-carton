@@ -19,7 +19,7 @@ class CartItem(object):
     def __init__(self, product, quantity, price):
         self.product = product
         self.quantity = int(quantity)
-        self.price = Decimal(str(price))
+        self.price = Decimal(price)
 
     def __repr__(self):
         return u'CartItem Object (%s)' % self.product
@@ -94,7 +94,6 @@ class Cart(object):
         Adds or creates products in cart. For an existing product,
         the quantity is increased and the price is ignored.
         """
-        print(kargs)
         quantity = int(quantity)
         if quantity < 1:
             raise ValueError('Quantity must be at least 1 when adding to cart')
