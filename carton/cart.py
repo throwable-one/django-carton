@@ -5,6 +5,12 @@ from django.conf import settings
 from carton import module_loading
 from carton import settings as carton_settings
 
+import simplejson as sj
+
+
+def _dict2key(dct):
+    return tuple(sorted(dct.items()))
+
 
 class CartItem(object):
     """
@@ -13,16 +19,15 @@ class CartItem(object):
     def __init__(self, product, quantity, price):
         self.product = product
         self.quantity = int(quantity)
-        self.price = Decimal(str(price))
+        self.price = Decimal(price)
 
     def __repr__(self):
         return u'CartItem Object (%s)' % self.product
 
     def to_dict(self):
         return {
-            'product_pk': self.product.pk,
             'quantity': self.quantity,
-            'price': str(self.price),
+            'price': self.price,
         }
 
     @property
@@ -34,25 +39,24 @@ class CartItem(object):
 
 
 class Cart(object):
-
-    """
-    A cart that lives in the session.
-    """
     def __init__(self, session, session_key=None):
         self._items_dict = {}
         self.session = session
         self.session_key = session_key or carton_settings.CART_SESSION_KEY
-            # If a cart representation was previously stored in session, then we
+        # If a cart representation was previously stored in session, then we
+        # TODO: with statemant. clear the cart if something wrong
         if self.session_key in self.session:
             # rebuild the cart object from that serialized representation.
-            cart_representation = self.session[self.session_key]
-            ids_in_cart = cart_representation.keys()
+            cart_representation = sj.loads(self.session[self.session_key] or '{}')
+            ids_in_cart = set(item['key']['_pk'] for item in cart_representation)
             products_queryset = self.get_queryset().filter(pk__in=ids_in_cart)
-            for product in products_queryset:
-                item = cart_representation[str(product.pk)]
-                self._items_dict[product.pk] = CartItem(
-                    product, item['quantity'], Decimal(item['price'])
-                )
+            for item in (
+                x for x in cart_representation
+                if x['key']['_pk'] in (i.pk for i in products_queryset)
+            ):
+                val = CartItem(products_queryset.get(pk=item['key']['_pk']), **item['value'])
+                val.__dict__.update(item['key'])
+                self._items_dict[_dict2key(item['key'])] = val
 
     def __contains__(self, product):
         """
@@ -85,7 +89,7 @@ class Cart(object):
         self.session[self.session_key] = self.cart_serializable
         self.session.modified = True
 
-    def add(self, product, price=None, quantity=1):
+    def add(self, product, price=None, quantity=1, **kargs):
         """
         Adds or creates products in cart. For an existing product,
         the quantity is increased and the price is ignored.
@@ -93,32 +97,38 @@ class Cart(object):
         quantity = int(quantity)
         if quantity < 1:
             raise ValueError('Quantity must be at least 1 when adding to cart')
-        if product in self.products:
-            self._items_dict[product.pk].quantity += quantity
+        kargs['_pk'] = product.pk
+        key = _dict2key(kargs)
+        if key in self._items_dict:
+            self._items_dict[key].quantity += quantity
         else:
             if price == None:
                 raise ValueError('Missing price when adding to cart')
-            self._items_dict[product.pk] = CartItem(product, quantity, price)
+            self._items_dict[key] = CartItem(product, quantity, price)
         self.update_session()
 
-    def remove(self, product):
+    def remove(self, product, **kargs):
         """
         Removes the product.
         """
-        if product in self.products:
-            del self._items_dict[product.pk]
+        kargs['_pk'] = product.pk
+        key = _dict2key(kargs)
+        if key in self._items_dict:
+            del self._items_dict[key]
             self.update_session()
 
-    def remove_single(self, product):
+    def remove_single(self, product, **kargs):
         """
         Removes a single product by decreasing the quantity.
         """
-        if product in self.products:
-            if self._items_dict[product.pk].quantity <= 1:
+        kargs['_pk'] = product.pk
+        key = dict2key(kargs)
+        if key in self._items_dict:
+            if self._items_dict[key].quantity <= 1:
                 # There's only 1 product left so we drop it
-                del self._items_dict[product.pk]
+                del self._items_dict[key]
             else:
-                self._items_dict[product.pk].quantity -= 1
+                self._items_dict[key].quantity -= 1
             self.update_session()
 
     def clear(self):
@@ -128,58 +138,32 @@ class Cart(object):
         self._items_dict = {}
         self.update_session()
 
-    def set_quantity(self, product, quantity):
-        """
-        Sets the product's quantity.
-        """
-        quantity = int(quantity)
-        if quantity < 0:
-            raise ValueError('Quantity must be positive when updating cart')
-        if product in self.products:
-            self._items_dict[product.pk].quantity = quantity
-            if self._items_dict[product.pk].quantity < 1:
-                del self._items_dict[product.pk]
-            self.update_session()
+    def _items_gen(self):
+        for key, item in self._items_dict.items():
+            # TODO avoid accidental changing one of key attributes (product_pk, quantity, price)
+            yield item
 
     @property
     def items(self):
         """
         The list of cart items.
         """
-        return self._items_dict.values()
+        return [x for x in self._items_gen()]
 
     @property
     def cart_serializable(self):
-        """
-        The serializable representation of the cart.
-        For instance:
-        {
-            '1': {'product_pk': 1, 'quantity': 2, price: '9.99'},
-            '2': {'product_pk': 2, 'quantity': 3, price: '29.99'},
-        }
-        Note how the product pk servers as the dictionary key.
-        """
-        cart_representation = {}
-        for item in self.items:
-            # JSON serialization: object attribute should be a string
-            product_id = str(item.product.pk)
-            cart_representation[product_id] = item.to_dict()
-        return cart_representation
+        ret = []
+        for key, value in self._items_dict.items():
+            ret.append({'key': {k:v for k,v in key}, 'value': value.to_dict()})
+        return sj.dumps(ret)
 
-
-    @property
-    def items_serializable(self):
-        """
-        The list of items formatted for serialization.
-        """
-        return self.cart_serializable.items()
+    #TODO Do I really need it?
+    #@property
+    #def items_serializable(self):
 
     @property
     def count(self):
-        """
-        The number of items in cart, that's the sum of quantities.
-        """
-        return sum([item.quantity for item in self.items])
+        return sum(item.quantity for item in self._items_gen())
 
     @property
     def unique_count(self):
@@ -194,14 +178,8 @@ class Cart(object):
 
     @property
     def products(self):
-        """
-        The list of associated products.
-        """
-        return [item.product for item in self.items]
+        return (item.product for item in self._items_gen())
 
     @property
     def total(self):
-        """
-        The total value of all items in the cart.
-        """
-        return sum([item.subtotal for item in self.items])
+        return sum(item.subtotal for item in self._items_gen())
